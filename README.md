@@ -48,10 +48,10 @@ AudioBridge/
 ## 技术架构
 
 ```
-┌─────────────┐     ┌──────────────────┐     ┌─────────────────────────┐
-│  AudioBridge │────▶│ a2dp_bridge.dll  │────▶│ AudioPlaybackConnection │
-│  (Go 托盘程序)│     │ (C ABI 封装)      │     │ (Windows 11 WinRT API)  │
-└─────────────┘     └──────────────────┘     └─────────────────────────┘
+┌───────────────┐      ┌──────────────────┐      ┌─────────────────────────┐
+│  AudioBridge  │────▶│ a2dp_bridge.dll  │────▶│ AudioPlaybackConnection │
+│  (Go 托盘程序)│      │ (C ABI 封装)     │      │ (Windows 11 WinRT API)  │
+└───────────────┘      └──────────────────┘      └─────────────────────────┘
 ```
 
 - Go 程序通过 `syscall.LoadDLL` 调用 DLL 导出的 C 函数
