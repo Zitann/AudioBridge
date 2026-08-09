@@ -109,8 +109,12 @@ bool CopyString(std::wstring const &source, wchar_t *buffer, int bufferSize) {
 // Ensure the calling thread has a COM apartment. Go may call the exported
 // functions from any of its threads, and each thread needs RoInitialize.
 bool EnsureApartment() {
-  int32_t hr = winrt::init_apartment(winrt::apartment_type::multi_threaded);
-  return !FAILED(hr);
+  try {
+    winrt::init_apartment(winrt::apartment_type::multi_threaded);
+    return true;
+  } catch (winrt::hresult_error const &) {
+    return false;
+  }
 }
 
 int GetCachedDeviceField(int index, wchar_t *buffer, int bufferSize,
@@ -140,13 +144,10 @@ extern "C" A2DP_API int A2DP_Init() {
   }
 
   // Initialize COM/WinRT (multithreaded apartment: callable from any thread).
-  int32_t hr = winrt::init_apartment(winrt::apartment_type::multi_threaded);
-  if (FAILED(hr)) {
-    wchar_t buffer[512];
-    swprintf_s(buffer, std::size(buffer),
-               L"winrt::init_apartment failed (0x%08X)",
-               static_cast<uint32_t>(hr));
-    SetLastError(buffer);
+  try {
+    winrt::init_apartment(winrt::apartment_type::multi_threaded);
+  } catch (winrt::hresult_error const &ex) {
+    SetLastError(ex);
     return A2DP_RESULT_EXCEPTION;
   }
 
