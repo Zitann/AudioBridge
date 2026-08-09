@@ -1,5 +1,7 @@
 # AudioBridge
 
+[English](README_EN.md) | [中文](README.md)
+
 Windows 托盘程序：将手机通过蓝牙连接到电脑，把手机音频流传输到电脑扬声器播放。
 
 基于 Windows 11 的 `AudioPlaybackConnection` WinRT API 实现。
