@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"sync"
+	"time"
 
 	"fyne.io/systray"
 )
@@ -10,11 +11,10 @@ import (
 type app struct {
 	bridge *a2dpBridge
 
-	mu        sync.Mutex
-	connected map[string]bool // deviceID -> 是否已连接
+	mu         sync.Mutex
+	connected  map[string]bool // deviceID -> 是否已连接
+	connecting map[string]bool // deviceID -> 正在连接中
 
-	deviceMenu *systray.MenuItem // “设备”子菜单
-	deviceItem map[*systray.MenuItem]device
 	statusItem *systray.MenuItem // 第一行：连接状态
 	hintItem   *systray.MenuItem // 第二行：提示信息
 }
@@ -23,7 +23,7 @@ func newApp(bridge *a2dpBridge) *app {
 	return &app{
 		bridge:     bridge,
 		connected:  make(map[string]bool),
-		deviceItem: make(map[*systray.MenuItem]device),
+		connecting: make(map[string]bool),
 	}
 }
 
@@ -35,6 +35,15 @@ func (a *app) setup() {
 	systray.SetTitle("AudioBridge")
 	systray.SetTooltip("AudioBridge - 手机音频桥接")
 
+	a.rebuildMenu()
+	go a.watchConnections()
+}
+
+// 整体重建菜单（顺序：状态 → 设备 → 刷新 → 蓝牙设置 → 退出）
+// systray 只支持往菜单末尾追加，因此用 ResetMenu 保证设备项位置正确
+func (a *app) rebuildMenu() {
+	systray.ResetMenu()
+
 	// 状态显示：两行，不可点击
 	a.statusItem = systray.AddMenuItem("未连接", "当前连接状态")
 	a.statusItem.Disable()
@@ -42,16 +51,39 @@ func (a *app) setup() {
 	a.hintItem.Disable()
 	systray.AddSeparator()
 
-	// 设备子菜单
-	a.deviceMenu = systray.AddMenuItem("设备", "已配对的蓝牙音频设备")
-	refreshItem := a.deviceMenu.AddSubMenuItem("刷新", "重新枚举设备")
+	// 设备列表
+	devices, err := a.bridge.Devices()
+	switch {
+	case err != nil:
+		item := systray.AddMenuItem("（枚举设备失败）", err.Error())
+		item.Disable()
+	case len(devices) == 0:
+		item := systray.AddMenuItem("（无已配对设备）", "请先在蓝牙设置中配对手机")
+		item.Disable()
+	default:
+		for _, dev := range devices {
+			item := systray.AddMenuItem(dev.Name, "点击连接/断开: "+dev.Name)
+			a.mu.Lock()
+			on := a.connected[dev.ID]
+			a.mu.Unlock()
+			if on {
+				item.Check()
+			}
+			go a.deviceLoop(item, dev)
+		}
+	}
 
+	refreshItem := systray.AddMenuItem("刷新设备列表", "重新枚举已配对的蓝牙音频设备")
 	systray.AddSeparator()
+
 	btItem := systray.AddMenuItem("蓝牙设置", "打开 Windows 蓝牙设置")
 	quitItem := systray.AddMenuItem("退出", "断开所有连接并退出")
 
-	// 各菜单项的事件循环
-	go a.refreshLoop(refreshItem)
+	go func() {
+		for range refreshItem.ClickedCh {
+			a.rebuildMenu()
+		}
+	}()
 	go func() {
 		for range btItem.ClickedCh {
 			openBluetoothSettings()
@@ -63,46 +95,27 @@ func (a *app) setup() {
 		}
 	}()
 
-	a.refreshDevices()
-}
-
-func (a *app) refreshLoop(item *systray.MenuItem) {
-	for range item.ClickedCh {
-		a.refreshDevices()
-	}
-}
-
-// 重新枚举设备并重建子菜单
-func (a *app) refreshDevices() {
-	devices, err := a.bridge.Devices()
-	if err != nil {
-		a.setStatus("枚举失败", err.Error())
-		return
-	}
-
-	// 移除旧的设备菜单项（保留最后的“刷新”项）
-	for item := range a.deviceItem {
-		item.Remove()
-	}
-	a.deviceItem = make(map[*systray.MenuItem]device, len(devices))
-
-	if len(devices) == 0 {
-		empty := a.deviceMenu.AddSubMenuItem("（无已配对设备）", "请先在蓝牙设置中配对手机")
-		empty.Disable()
-		a.deviceItem[empty] = device{}
-		a.setStatus("未发现设备", "请在蓝牙设置中配对手机")
-		return
-	}
-
-	for _, dev := range devices {
-		item := a.deviceMenu.AddSubMenuItem(dev.Name, "点击连接/断开: "+dev.Name)
-		if a.connected[dev.ID] {
-			item.Check()
-		}
-		a.deviceItem[item] = dev
-		go a.deviceLoop(item, dev)
-	}
 	a.updateStatus()
+}
+
+// 定时校对连接状态：手机端主动断开时，DLL 侧连接会自动关闭，
+// 这里用实际连接数同步本地状态并重建菜单勾选
+func (a *app) watchConnections() {
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		actual := a.bridge.ConnectionCount()
+		a.mu.Lock()
+		drift := actual != len(a.connected)
+		if actual < len(a.connected) {
+			// 实际连接变少，清空后等用户重新连接
+			a.connected = make(map[string]bool)
+		}
+		a.mu.Unlock()
+		if drift {
+			a.rebuildMenu()
+		}
+	}
 }
 
 // 单个设备菜单项的点击处理：已连接则断开，未连接则连接
@@ -110,7 +123,12 @@ func (a *app) deviceLoop(item *systray.MenuItem, dev device) {
 	for range item.ClickedCh {
 		a.mu.Lock()
 		isConnected := a.connected[dev.ID]
+		isConnecting := a.connecting[dev.ID]
 		a.mu.Unlock()
+
+		if isConnecting {
+			continue // 连接过程中忽略重复点击
+		}
 
 		if isConnected {
 			if err := a.bridge.Disconnect(dev.ID); err != nil {
@@ -120,10 +138,19 @@ func (a *app) deviceLoop(item *systray.MenuItem, dev device) {
 			a.mu.Lock()
 			delete(a.connected, dev.ID)
 			a.mu.Unlock()
-			item.Uncheck()
 		} else {
+			a.mu.Lock()
+			a.connecting[dev.ID] = true
+			a.mu.Unlock()
+
 			a.setStatus("连接中…", dev.Name)
-			if err := a.bridge.Connect(dev.ID); err != nil {
+			err := a.bridge.Connect(dev.ID)
+
+			a.mu.Lock()
+			delete(a.connecting, dev.ID)
+			a.mu.Unlock()
+
+			if err != nil {
 				messageBox("连接失败", err.Error())
 				a.updateStatus()
 				continue
@@ -131,9 +158,8 @@ func (a *app) deviceLoop(item *systray.MenuItem, dev device) {
 			a.mu.Lock()
 			a.connected[dev.ID] = true
 			a.mu.Unlock()
-			item.Check()
 		}
-		a.updateStatus()
+		a.rebuildMenu()
 	}
 }
 
@@ -142,7 +168,7 @@ func (a *app) updateStatus() {
 	n := len(a.connected)
 	a.mu.Unlock()
 	if n == 0 {
-		a.setStatus("未连接", "点击“设备”连接手机")
+		a.setStatus("未连接", "点击设备名称连接手机")
 	} else {
 		a.setStatus(fmt.Sprintf("已连接 %d 台", n), "正在播放手机音频")
 	}
