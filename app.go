@@ -12,8 +12,9 @@ type app struct {
 	bridge *a2dpBridge
 
 	mu         sync.Mutex
-	connected  map[string]bool // deviceID -> 是否已连接
-	connecting map[string]bool // deviceID -> 正在连接中
+	connected  map[string]bool   // deviceID -> 是否已连接
+	connecting map[string]bool   // deviceID -> 正在连接中
+	devNames   map[string]string // deviceID -> 设备名称（用于状态显示）
 
 	statusItem *systray.MenuItem // 第一行：连接状态
 	hintItem   *systray.MenuItem // 第二行：提示信息
@@ -24,6 +25,7 @@ func newApp(bridge *a2dpBridge) *app {
 		bridge:     bridge,
 		connected:  make(map[string]bool),
 		connecting: make(map[string]bool),
+		devNames:   make(map[string]string),
 	}
 }
 
@@ -64,6 +66,7 @@ func (a *app) rebuildMenu() {
 		for _, dev := range devices {
 			item := systray.AddMenuItem(dev.Name, "点击连接/断开: "+dev.Name)
 			a.mu.Lock()
+			a.devNames[dev.ID] = dev.Name
 			on := a.connected[dev.ID]
 			a.mu.Unlock()
 			if on {
@@ -143,8 +146,20 @@ func (a *app) deviceLoop(item *systray.MenuItem, dev device) {
 			a.connecting[dev.ID] = true
 			a.mu.Unlock()
 
-			a.setStatus("连接中…", dev.Name)
-			err := a.bridge.Connect(dev.ID)
+			// 连接失败自动重试 2 次，间隔 1 秒（蓝牙偶发超时很常见）
+			var err error
+			for attempt := 1; attempt <= 3; attempt++ {
+				if attempt == 1 {
+					a.setStatus("连接中…", dev.Name)
+				} else {
+					a.setStatus(fmt.Sprintf("重试 %d/2…", attempt-1), dev.Name)
+					time.Sleep(time.Second)
+				}
+				err = a.bridge.Connect(dev.ID)
+				if err == nil {
+					break
+				}
+			}
 
 			a.mu.Lock()
 			delete(a.connecting, dev.ID)
@@ -157,6 +172,7 @@ func (a *app) deviceLoop(item *systray.MenuItem, dev device) {
 			}
 			a.mu.Lock()
 			a.connected[dev.ID] = true
+			a.devNames[dev.ID] = dev.Name
 			a.mu.Unlock()
 		}
 		a.rebuildMenu()
@@ -165,12 +181,21 @@ func (a *app) deviceLoop(item *systray.MenuItem, dev device) {
 
 func (a *app) updateStatus() {
 	a.mu.Lock()
-	n := len(a.connected)
+	names := make([]string, 0, len(a.connected))
+	for id := range a.connected {
+		if name := a.devNames[id]; name != "" {
+			names = append(names, name)
+		}
+	}
 	a.mu.Unlock()
-	if n == 0 {
+
+	switch len(names) {
+	case 0:
 		a.setStatus("未连接", "点击设备名称连接手机")
-	} else {
-		a.setStatus(fmt.Sprintf("已连接 %d 台", n), "正在播放手机音频")
+	case 1:
+		a.setStatus("已连接 "+names[0], "正在播放手机音频")
+	default:
+		a.setStatus(fmt.Sprintf("已连接 %d 台", len(names)), "正在播放手机音频")
 	}
 }
 
