@@ -21,8 +21,7 @@ func onReady() {
 		return
 	}
 	if err := bridge.Init(); err != nil {
-		messageBox("AudioBridge 启动失败",
-			"初始化音频桥接失败（需要 Windows 11 22000 及以上版本）\n\n"+err.Error())
+		messageBox(T(keyStartFailed), T(keyInitFailed)+err.Error())
 		systray.Quit()
 		return
 	}
